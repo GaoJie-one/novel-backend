@@ -14,7 +14,7 @@ The server defaults to `http://127.0.0.1:3000`.
 
 ## WeChat Cloud Hosting
 
-Use the Express.js template, then deploy this folder as the service code. Use:
+Use the Express.js template, then deploy this folder as the service code.
 
 ```text
 Build command: npm install
