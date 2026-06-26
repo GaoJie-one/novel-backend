@@ -1,11 +1,14 @@
 require("./config");
 
 const cors = require("cors");
+const dns = require("node:dns");
 const express = require("express");
 
 const generateRoutes = require("./routes/generate");
 const projectRoutes = require("./routes/projects");
 const wechatRoutes = require("./routes/wechat");
+
+dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;

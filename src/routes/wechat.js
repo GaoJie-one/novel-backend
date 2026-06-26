@@ -51,6 +51,18 @@ function formatProject(project, chapters) {
 
 router.post("/login", async (request, response) => {
   try {
+    const cloudOpenid = request.headers["x-wx-openid"] || request.headers["x-cloudbase-openid"];
+
+    if (typeof cloudOpenid === "string" && cloudOpenid.trim()) {
+      const openid = cloudOpenid.trim();
+
+      response.json({
+        token: createWechatSessionToken(openid),
+        openid
+      });
+      return;
+    }
+
     const appid = process.env.WECHAT_APP_ID;
     const secret = process.env.WECHAT_APP_SECRET;
 
@@ -70,7 +82,25 @@ router.post("/login", async (request, response) => {
     url.searchParams.set("js_code", request.body.code);
     url.searchParams.set("grant_type", "authorization_code");
 
-    const codeResponse = await fetch(url);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let codeResponse;
+
+    try {
+      codeResponse = await fetch(url, { signal: controller.signal });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "unknown error";
+      const message =
+        error instanceof Error && error.name === "AbortError"
+          ? "微信接口请求超时，请检查云托管服务是否允许访问 api.weixin.qq.com。"
+          : `微信接口请求失败，请检查云托管出网能力和 DNS 配置。${detail}`;
+
+      response.status(502).json({ error: message });
+      return;
+    } finally {
+      clearTimeout(timeout);
+    }
+
     const payload = await codeResponse.json();
 
     if (!codeResponse.ok || payload.errcode || !payload.openid) {
