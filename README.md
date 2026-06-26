@@ -19,7 +19,7 @@ Use the Express.js template, then deploy this folder as the service code.
 ```text
 Build command: npm install
 Start command: npm start
-Port: 3000
+Port: 80
 ```
 
 If Cloud Hosting asks for container configuration, the included `Dockerfile` can be used directly.
