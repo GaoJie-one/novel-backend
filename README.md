@@ -51,8 +51,12 @@ Optional:
 
 ```env
 PORT=3000
+LLM_TIMEOUT_MS=120000
+LLM_MAX_RETRIES=1
 WECHAT_DAILY_GENERATION_LIMIT=5
 ```
+
+For OpenAI-compatible providers, `LLM_BASE_URL` usually needs to be a complete cloud-accessible HTTPS endpoint that includes `/v1`, for example `https://api.openai.com/v1` or the provider's documented OpenAI-compatible base URL. Do not use `localhost`, `127.0.0.1`, or a private machine URL in Cloud Hosting.
 
 ## API
 

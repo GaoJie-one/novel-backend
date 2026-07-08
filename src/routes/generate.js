@@ -12,6 +12,7 @@ const finalChapterRequirement =
   "这是最后一章，必须完成主线冲突、交代主要人物命运，并写出明确的小说结尾。不要留下下一章悬念，不要写成未完待续。";
 const middleChapterRequirement =
   "这不是最后一章，需要推进阶段性冲突并在章末留下自然的后续期待，但不能让当前章节显得没有收束。";
+const localHostnames = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
 
 function normalizeText(value, fallback = "") {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
@@ -25,6 +26,71 @@ function normalizePositiveNumber(value, fallback, min, max) {
   }
 
   return Math.min(Math.max(Math.round(parsed), min), max);
+}
+
+function collectErrorMessages(error, messages = []) {
+  if (!error || messages.length >= 6) {
+    return messages;
+  }
+
+  if (error instanceof Error && error.message) {
+    messages.push(error.message);
+  } else if (typeof error === "string" && error.trim()) {
+    messages.push(error.trim());
+  }
+
+  if (error && typeof error === "object" && "cause" in error) {
+    collectErrorMessages(error.cause, messages);
+  }
+
+  return messages;
+}
+
+function getErrorDetail(error) {
+  return Array.from(new Set(collectErrorMessages(error))).join("；");
+}
+
+function isNetworkError(error) {
+  const detail = getErrorDetail(error).toLowerCase();
+
+  return [
+    "fetch failed",
+    "connection error",
+    "network",
+    "enotfound",
+    "econnrefused",
+    "econnreset",
+    "etimedout",
+    "und_err",
+    "socket"
+  ].some((keyword) => detail.includes(keyword));
+}
+
+function normalizeLlmError(error) {
+  const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+  const detail = getErrorDetail(error);
+
+  if (status === 401 || status === 403) {
+    return new Error("LLM 接口认证失败，请检查 CloudBase 环境变量 LLM_API_KEY、模型服务账号权限和余额。");
+  }
+
+  if (status === 404) {
+    return new Error("LLM 接口地址或模型不存在，请检查 LLM_BASE_URL 是否包含正确的 /v1 路径，以及 LLM_MODEL_NAME 是否可用。");
+  }
+
+  if (status === 429) {
+    return new Error("LLM 接口限流或额度不足，请检查模型服务额度、并发限制和 LLM_API_KEY。");
+  }
+
+  if (status >= 500) {
+    return new Error(`LLM 服务端异常，请稍后重试或查看模型服务控制台。${detail}`);
+  }
+
+  if (isNetworkError(error)) {
+    return new Error(`LLM 接口连接失败，请检查 CloudBase 环境变量 LLM_BASE_URL 是否为云端可访问的完整 HTTPS 地址，通常需要包含 /v1；同时确认云托管服务可以访问该域名。底层错误：${detail || "fetch failed"}`);
+  }
+
+  return new Error(detail || "LLM 调用失败，请检查模型服务配置。");
 }
 
 function countVisibleCharacters(value) {
@@ -160,25 +226,48 @@ function normalizeExistingChapters(value, chapterCount) {
 }
 
 function createOpenAIClient() {
-  const baseURL = process.env.LLM_BASE_URL;
+  const baseURL = normalizeText(process.env.LLM_BASE_URL, "").replace(/\/+$/, "");
   const apiKey = process.env.LLM_API_KEY;
 
   if (!baseURL || !apiKey || !process.env.LLM_MODEL_NAME) {
     throw new Error("LLM 环境变量未配置完整，请检查 LLM_BASE_URL、LLM_API_KEY、LLM_MODEL_NAME。");
   }
 
-  return new OpenAI({ apiKey, baseURL });
+  let parsedBaseUrl;
+
+  try {
+    parsedBaseUrl = new URL(baseURL);
+  } catch {
+    throw new Error("LLM_BASE_URL 必须是以 http:// 或 https:// 开头的完整地址，通常需要包含 /v1。");
+  }
+
+  if (localHostnames.has(parsedBaseUrl.hostname)) {
+    throw new Error("LLM_BASE_URL 不能使用 localhost、127.0.0.1 或 0.0.0.0，云托管需要访问公网或云上可达的模型服务地址。");
+  }
+
+  return new OpenAI({
+    apiKey,
+    baseURL,
+    maxRetries: normalizePositiveNumber(process.env.LLM_MAX_RETRIES, 1, 0, 5),
+    timeout: normalizePositiveNumber(process.env.LLM_TIMEOUT_MS, 120000, 10000, 600000)
+  });
 }
 
 async function createChatCompletion(client, messages, maxTokens, options = {}) {
-  const completion = await client.chat.completions.create({
-    model: process.env.LLM_MODEL_NAME,
-    messages,
-    temperature: options.temperature || 0.82,
-    top_p: options.topP || 0.92,
-    max_tokens: maxTokens,
-    stream: false
-  });
+  let completion;
+
+  try {
+    completion = await client.chat.completions.create({
+      model: process.env.LLM_MODEL_NAME,
+      messages,
+      temperature: options.temperature || 0.82,
+      top_p: options.topP || 0.92,
+      max_tokens: maxTokens,
+      stream: false
+    });
+  } catch (error) {
+    throw normalizeLlmError(error);
+  }
 
   const content = completion.choices[0]?.message?.content;
   return typeof content === "string" ? content.trim() : "";
