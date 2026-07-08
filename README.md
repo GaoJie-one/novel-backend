@@ -64,6 +64,8 @@ For OpenAI-compatible providers, `LLM_BASE_URL` usually needs to be a complete c
 GET  /health
 POST /api/wechat/login
 POST /api/generate/novel
+POST /api/generate/novel-jobs
+GET  /api/generate/novel-jobs/:jobId
 POST /api/generate/quality
 GET  /api/wechat/projects
 POST /api/wechat/projects

@@ -1,12 +1,15 @@
 const express = require("express");
+const crypto = require("crypto");
 const OpenAIModule = require("openai");
 const { requireWechatSession } = require("../lib/auth");
 const { consumeGenerationQuota } = require("../lib/quota");
 
 const OpenAI = OpenAIModule.default || OpenAIModule;
 const router = express.Router();
+const generationJobs = new Map();
 
 const fallbackChapterNames = ["命运开端", "暗潮浮现", "风暴逼近", "真相裂隙", "新的征途"];
+const generationJobTtlMs = 30 * 60 * 1000;
 const maxChapterCompletionAttempts = 5;
 const finalChapterRequirement =
   "这是最后一章，必须完成主线冲突、交代主要人物命运，并写出明确的小说结尾。不要留下下一章悬念，不要写成未完待续。";
@@ -26,6 +29,51 @@ function normalizePositiveNumber(value, fallback, min, max) {
   }
 
   return Math.min(Math.max(Math.round(parsed), min), max);
+}
+
+function updateGenerationJob(job, patch) {
+  Object.assign(job, patch, {
+    updatedAt: new Date().toISOString()
+  });
+}
+
+function serializeGenerationJob(job) {
+  return {
+    id: job.id,
+    status: job.status,
+    message: job.message,
+    result: job.result || null,
+    error: job.error || "",
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt
+  };
+}
+
+function scheduleGenerationJobCleanup(jobId) {
+  const timer = setTimeout(() => {
+    generationJobs.delete(jobId);
+  }, generationJobTtlMs);
+
+  if (typeof timer.unref === "function") {
+    timer.unref();
+  }
+}
+
+function getAuthorizedGenerationJob(request, response) {
+  const session = requireWechatSession(request, response);
+
+  if (!session) {
+    return null;
+  }
+
+  const job = generationJobs.get(request.params.jobId);
+
+  if (!job || job.openid !== session.id) {
+    response.status(404).json({ error: "生成任务不存在或已过期，请重新生成。" });
+    return null;
+  }
+
+  return job;
 }
 
 function collectErrorMessages(error, messages = []) {
@@ -449,6 +497,153 @@ ${content.slice(-1200)}
   return content;
 }
 
+function normalizeNovelRequest(rawBody) {
+  return {
+    avoidances: normalizeText(rawBody.avoidances, ""),
+    existingChapters: normalizeExistingChapters(rawBody.existingChapters, normalizePositiveNumber(rawBody.chapterCount, 1, 1, 20)),
+    genre: normalizeText(rawBody.genre, "玄幻"),
+    protagonist: normalizeText(rawBody.protagonist, "主要人物：一名踏上改变命运旅程的年轻人"),
+    projectTitle: normalizeText(rawBody.projectTitle, ""),
+    setting: normalizeText(rawBody.setting, "架空世界"),
+    prompt: normalizeText(rawBody.prompt, "主要人物踏上改变命运的旅程"),
+    style: normalizeText(rawBody.style, "热血激昂"),
+    targetChapterNumber: normalizePositiveNumber(rawBody.targetChapterNumber, 0, 0, 20),
+    chapterCount: normalizePositiveNumber(rawBody.chapterCount, 1, 1, 20),
+    wordsPerChapter: normalizePositiveNumber(rawBody.wordsPerChapter, 2000, 500, 8000)
+  };
+}
+
+async function createNovelPayload(session, rawBody, onProgress = () => {}) {
+  const body = normalizeNovelRequest(rawBody || {});
+
+  onProgress("正在检查生成额度...");
+  await consumeGenerationQuota(session);
+
+  onProgress("正在连接模型服务...");
+  const client = createOpenAIClient();
+
+  if (body.targetChapterNumber) {
+    onProgress(`正在生成第 ${body.targetChapterNumber} 章...`);
+    const sourceChapters = body.existingChapters.length ? body.existingChapters : buildFallbackPlan(body).chapters || [];
+    const targetChapter =
+      sourceChapters.find((chapter) => chapter.chapterNumber === body.targetChapterNumber) || {
+        chapterNumber: body.targetChapterNumber,
+        title: `第${body.targetChapterNumber}章`,
+        outline: "延续全书主线推进本章剧情。"
+      };
+    const continuityContext = {
+      previousChapters: sourceChapters
+        .filter((chapter) => chapter.chapterNumber < targetChapter.chapterNumber)
+        .map((chapter) => ({
+          chapterNumber: chapter.chapterNumber,
+          title: chapter.title,
+          outline: chapter.outline,
+          ending: chapter.ending || "已有章节，请承接该章大纲所形成的状态，不要重复该章主要场景。"
+        }))
+    };
+    const content = await generateChapterContent(client, body, body.projectTitle || "未命名小说", sourceChapters, targetChapter, continuityContext);
+
+    return {
+      title: body.projectTitle || "未命名小说",
+      chapters: [
+        {
+          ...targetChapter,
+          content
+        }
+      ]
+    };
+  }
+
+  onProgress("正在生成章节大纲...");
+  const plan = await generatePlan(client, body);
+  const chapters = [];
+  const continuityContext = {
+    previousChapters: []
+  };
+
+  for (const chapter of plan.chapters) {
+    onProgress(`正在生成第 ${chapter.chapterNumber}/${body.chapterCount} 章...`);
+    const content = await generateChapterContent(client, body, plan.title, plan.chapters, chapter, continuityContext);
+    const generatedChapter = {
+      ...chapter,
+      content
+    };
+
+    chapters.push(generatedChapter);
+    continuityContext.previousChapters.push({
+      chapterNumber: generatedChapter.chapterNumber,
+      title: generatedChapter.title,
+      outline: generatedChapter.outline,
+      ending: createChapterEnding(generatedChapter.content)
+    });
+  }
+
+  return {
+    title: plan.title,
+    chapters
+  };
+}
+
+router.post("/novel-jobs", async (request, response) => {
+  const session = requireWechatSession(request, response);
+
+  if (!session) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const job = {
+    id: crypto.randomUUID(),
+    openid: session.id,
+    status: "pending",
+    message: "生成任务已创建，正在排队...",
+    result: null,
+    error: "",
+    createdAt: now,
+    updatedAt: now
+  };
+
+  generationJobs.set(job.id, job);
+  scheduleGenerationJobCleanup(job.id);
+
+  setImmediate(async () => {
+    try {
+      updateGenerationJob(job, {
+        status: "running",
+        message: "开始生成小说..."
+      });
+
+      const result = await createNovelPayload(session, request.body, (message) => {
+        updateGenerationJob(job, { message });
+      });
+
+      updateGenerationJob(job, {
+        status: "completed",
+        message: "生成完成",
+        result
+      });
+    } catch (error) {
+      updateGenerationJob(job, {
+        status: "failed",
+        message: "生成失败",
+        error: error instanceof Error ? error.message : "小说生成失败，请稍后重试。"
+      });
+    }
+  });
+
+  response.status(202).json(serializeGenerationJob(job));
+});
+
+router.get("/novel-jobs/:jobId", (request, response) => {
+  const job = getAuthorizedGenerationJob(request, response);
+
+  if (!job) {
+    return;
+  }
+
+  response.json(serializeGenerationJob(job));
+});
+
 router.post("/novel", async (request, response) => {
   try {
     const session = requireWechatSession(request, response);
@@ -457,83 +652,7 @@ router.post("/novel", async (request, response) => {
       return;
     }
 
-    const rawBody = request.body || {};
-    const body = {
-      avoidances: normalizeText(rawBody.avoidances, ""),
-      existingChapters: normalizeExistingChapters(rawBody.existingChapters, normalizePositiveNumber(rawBody.chapterCount, 1, 1, 20)),
-      genre: normalizeText(rawBody.genre, "玄幻"),
-      protagonist: normalizeText(rawBody.protagonist, "主要人物：一名踏上改变命运旅程的年轻人"),
-      projectTitle: normalizeText(rawBody.projectTitle, ""),
-      setting: normalizeText(rawBody.setting, "架空世界"),
-      prompt: normalizeText(rawBody.prompt, "主要人物踏上改变命运的旅程"),
-      style: normalizeText(rawBody.style, "热血激昂"),
-      targetChapterNumber: normalizePositiveNumber(rawBody.targetChapterNumber, 0, 0, 20),
-      chapterCount: normalizePositiveNumber(rawBody.chapterCount, 1, 1, 20),
-      wordsPerChapter: normalizePositiveNumber(rawBody.wordsPerChapter, 2000, 500, 8000)
-    };
-
-    await consumeGenerationQuota(session);
-
-    const client = createOpenAIClient();
-
-    if (body.targetChapterNumber) {
-      const sourceChapters = body.existingChapters.length ? body.existingChapters : buildFallbackPlan(body).chapters || [];
-      const targetChapter =
-        sourceChapters.find((chapter) => chapter.chapterNumber === body.targetChapterNumber) || {
-          chapterNumber: body.targetChapterNumber,
-          title: `第${body.targetChapterNumber}章`,
-          outline: "延续全书主线推进本章剧情。"
-        };
-      const continuityContext = {
-        previousChapters: sourceChapters
-          .filter((chapter) => chapter.chapterNumber < targetChapter.chapterNumber)
-          .map((chapter) => ({
-            chapterNumber: chapter.chapterNumber,
-            title: chapter.title,
-            outline: chapter.outline,
-            ending: chapter.ending || "已有章节，请承接该章大纲所形成的状态，不要重复该章主要场景。"
-          }))
-      };
-      const content = await generateChapterContent(client, body, body.projectTitle || "未命名小说", sourceChapters, targetChapter, continuityContext);
-
-      response.json({
-        title: body.projectTitle || "未命名小说",
-        chapters: [
-          {
-            ...targetChapter,
-            content
-          }
-        ]
-      });
-      return;
-    }
-
-    const plan = await generatePlan(client, body);
-    const chapters = [];
-    const continuityContext = {
-      previousChapters: []
-    };
-
-    for (const chapter of plan.chapters) {
-      const content = await generateChapterContent(client, body, plan.title, plan.chapters, chapter, continuityContext);
-      const generatedChapter = {
-        ...chapter,
-        content
-      };
-
-      chapters.push(generatedChapter);
-      continuityContext.previousChapters.push({
-        chapterNumber: generatedChapter.chapterNumber,
-        title: generatedChapter.title,
-        outline: generatedChapter.outline,
-        ending: createChapterEnding(generatedChapter.content)
-      });
-    }
-
-    response.json({
-      title: plan.title,
-      chapters
-    });
+    response.json(await createNovelPayload(session, request.body));
   } catch (error) {
     response.status(500).json({ error: error instanceof Error ? error.message : "小说生成失败，请稍后重试。" });
   }
