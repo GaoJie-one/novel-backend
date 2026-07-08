@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const WebSocket = require("ws");
 
 function createSupabaseAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -12,6 +13,9 @@ function createSupabaseAdminClient() {
     auth: {
       persistSession: false,
       autoRefreshToken: false
+    },
+    realtime: {
+      transport: WebSocket
     }
   });
 }

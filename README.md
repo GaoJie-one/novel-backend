@@ -24,6 +24,14 @@ Port: 80
 
 If Cloud Hosting asks for container configuration, the included `Dockerfile` can be used directly.
 
+If the Cloud Hosting console does not show a Node.js version selector, the runtime is controlled by the container image. This project pins the image in `Dockerfile`:
+
+```dockerfile
+FROM node:22-alpine
+```
+
+After changing the runtime or dependencies, rebuild and redeploy the Cloud Hosting service so the new image replaces the previous Node.js 20 container.
+
 ## Environment Variables
 
 Required:
