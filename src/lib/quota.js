@@ -1,20 +1,28 @@
 const { getSessionUserId } = require("./auth");
 const { createSupabaseAdminClient } = require("./supabase");
 
+function collectErrorMessages(error, messages = []) {
+  if (!error || messages.length >= 6) {
+    return messages;
+  }
+
+  if (error instanceof Error && error.message) {
+    messages.push(error.message);
+  } else if (typeof error === "object" && "message" in error) {
+    messages.push(String(error.message || ""));
+  } else if (typeof error === "string" && error.trim()) {
+    messages.push(error.trim());
+  }
+
+  if (error && typeof error === "object" && "cause" in error) {
+    collectErrorMessages(error.cause, messages);
+  }
+
+  return messages;
+}
+
 function getErrorDetail(error) {
-  if (!error) {
-    return "";
-  }
-
-  if (error instanceof Error) {
-    return error.message || "";
-  }
-
-  if (typeof error === "object" && "message" in error) {
-    return String(error.message || "");
-  }
-
-  return String(error || "");
+  return Array.from(new Set(collectErrorMessages(error))).join("；");
 }
 
 function isNetworkError(error) {

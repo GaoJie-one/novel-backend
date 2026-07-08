@@ -62,6 +62,7 @@ For OpenAI-compatible providers, `LLM_BASE_URL` usually needs to be a complete c
 
 ```text
 GET  /health
+GET  /health/supabase
 POST /api/wechat/login
 POST /api/generate/novel
 POST /api/generate/novel-jobs
@@ -75,3 +76,23 @@ DELETE /api/projects/:projectId
 ## Database
 
 This backend reuses the existing Supabase `projects`, `chapters`, and `generation_usage` tables. If needed, run `supabase/migrations/0001_generation_usage.sql` in Supabase SQL editor.
+
+## Supabase Connectivity Check
+
+After deploying to Cloud Hosting, open:
+
+```text
+https://<your-cloud-hosting-domain>/health/supabase
+```
+
+This endpoint does not expose secrets. It only reports whether Supabase environment variables exist, whether the Supabase hostname resolves from inside the container, and whether the container can reach Supabase over HTTP.
+
+Read the result like this:
+
+```text
+"configured.url": false              NEXT_PUBLIC_SUPABASE_URL is missing.
+"configured.serviceRoleKey": false   SUPABASE_SERVICE_ROLE_KEY is missing.
+"dns.ok": false                      Cloud Hosting cannot resolve the Supabase domain.
+"http.ok": false                     DNS works, but Cloud Hosting cannot connect to Supabase HTTP.
+"http.ok": true                      Cloud Hosting can reach the Supabase domain.
+```
