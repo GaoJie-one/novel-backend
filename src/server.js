@@ -89,7 +89,8 @@ app.get("/health/supabase", async (_request, response) => {
     });
 
     result.http = {
-      ok: true,
+      ok: probeResponse.status < 500,
+      reachable: true,
       status: probeResponse.status,
       statusText: probeResponse.statusText,
       elapsedMs: Date.now() - startedAt
